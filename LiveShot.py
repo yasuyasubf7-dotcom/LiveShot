@@ -269,7 +269,7 @@ with tab_list:
                         st.write(f"**会場:** {row['venue']}")
                         st.write(f"**開演:** {row['start_time']}")
                         st.write(f"**料金:** {row['price']}")
-                        cal_url = get_google_calendar_url(row['name'], row['date'], row['venue'], row['url'])
+                        cal_url = get_google_calendar_url(row['name'], row['date'], row['venue'], row['start_time'], row['url'])
                         st.link_button("📅 Googleカレンダーに登録", cal_url)
                         if row['url']:
                             st.link_button("チケット・詳細URL", row['url'])
