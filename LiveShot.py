@@ -10,7 +10,7 @@ import urllib.parse
 import re
 
 # --- カレンダーURL生成ヘルパー ---
-def get_google_calendar_url(name, date_str, venue, url):
+def get_google_calendar_url(name, date_str, venue, start_time, url):
     base_url = "https://www.google.com/calendar/render?action=TEMPLATE"
     
     # 日付と時刻の整形 (YYYYMMDD形式)
