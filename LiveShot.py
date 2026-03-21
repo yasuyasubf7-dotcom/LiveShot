@@ -1,0 +1,293 @@
+import streamlit as st
+from google import genai
+from google.genai import types
+import sqlite3
+import json
+from PIL import Image
+import pandas as pd
+from datetime import datetime
+import urllib.parse
+import re
+
+# --- カレンダーURL生成ヘルパー ---
+def get_google_calendar_url(name, date_str, venue, url):
+    base_url = "https://www.google.com/calendar/render?action=TEMPLATE"
+    
+    # 日付と時刻の整形 (YYYYMMDD形式)
+    try:
+        clean_date = date_str.replace("/", "").replace("-", "")[:8]
+    except:
+        clean_date = ""
+
+    # 時刻の整形 (19:00 -> 190000)
+    itme_str = "000000" # デフォルト
+    if start_time:
+        digits = re.sub(r'\D', '', start_time) # 数字のみ抽出
+        if len(digits) >= 4:
+            time_str = digits[:4] + "00"
+
+    # 開始と終了（とりあえず3時間後）を設定
+    start_dt = f"{clean_date}T{time_str}"
+    # 簡易的に同じ時刻を終了に設定（Google側で調整可能）
+    dates = f"{start_dt}/{start_dt}"    
+
+    params = {
+        "text": f"ライブ: {name}",
+        "dates": f"{clean_date}/{clean_date}",
+        "location": venue,
+        "details": f"詳細URL {url}",
+    }
+    return base_url + "&" +urllib.parse.urlencode(params)
+
+# --- 0. データベース初期設定 ---
+def init_db():
+    conn = sqlite3.connect('live_info.db', check_same_thread=False)
+    c = conn.cursor()
+    # eventsテーブルの作成（出演者リストはカンマ区切りの文字列として保存）
+    c.execute('''CREATE TABLE IF NOT EXISTS events 
+                (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                 name TEXT, date TEXT, venue TEXT, artists TEXT, 
+                 start_time TEXT, price TEXT, organizer TEXT, 
+                 contact TEXT, url TEXT,
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn.commit()
+    return conn
+
+db_conn = init_db()
+
+# --- 1. 利用可能なモデルを取得する関数 ---
+def get_available_models():
+    try:
+        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        # モデル一覧を取得
+        models = client.models.list()
+        # 生成（generateContent）が可能なモデルのみを抽出
+        valid_models = [
+            (m.name or "").replace("models/", "")
+            for m in models
+            if "generateContent" in (getattr(m, "supported_actions", []) or [])
+        ]
+        # 取得できなかったときの保険（空配列対策）
+        return valid_models or ["gemini-flash-lite-latest"]
+    except Exception as e:
+        st.error(f"モデルリストの取得に失敗しました: {e}")
+        return ["gemini-flash-lite-latest"]
+
+# --- 2. Gemini APIによる解析エンジン（model_idを引数で受け取る） ---
+def extract_info_from_gemini(image, model_id):
+    # 1. クライアントの初期化（configではなくClientオブジェクトを作る形式に）
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+    prompt = """
+    あなたはライブ情報の抽出に特化したアシスタントです。
+    提供された画像から、以下の項目を抽出し、JSON形式のみで出力してください。
+    Markdownの装飾(```jsonなど)は一切不要です。
+    
+    【項目】
+    - イベント名称
+    - 公演日(YYYY/MM/DD形式を推測、不明なら画像通りに)
+    - 会場名
+    - 出演者リスト（配列）
+    - 開演時間
+    - チケット金額
+    - 主催者
+    - 問い合わせ先
+    - 関連URL
+    """
+
+    try:
+        response = client.models.generate_content(
+            model=model_id,
+            contents=[prompt, image]
+        )
+
+        # 4. JSONのパース（新しいSDKでは .text で結果が取れます）
+        res_text = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(res_text)
+    
+    except Exception as e:
+        # クォータエラーの場合、ユーザーにわかりやすく伝える
+        if "429" in str(e):
+            st.error(f"モデル '{model_id}' の無料枠制限に達しました。別のモデルを試すか、数分待ってください。")
+        else:
+            st.error(f"解析中にエラーが発生しました：{e}")
+        return None
+
+# --- 3. Streamlit UIレイアウト ---
+st.set_page_config(page_title="LiveShot Admin", layout="wide")
+st.title("🎸 LiveShot: スクショを予定に変える")
+
+with st.sidebar:
+    # サイドバーでモデルを選択
+    st.header("⚙️ 設定")
+    available_models = get_available_models()
+    selected_model = st.selectbox(
+        "使用するAIモデルを選択", 
+        available_models,
+        index=available_models.index("gemini-flash-lite-latest") if "gemini-flash-lite-latest" in available_models else 0
+    )
+    st.info(f"現在の選択: {selected_model}")
+
+    st.divider()
+
+    # サイドバー: 保存済みのデータの確認
+    st.header("🗑️ データ管理")
+    if st.button("全データを削除 (注意!)"):
+        if st.checkbox("本当に削除しますか？"):
+            db_conn.cursor().execute("DELETE FROM events")
+            db_conn.commit()
+            st.warning("データを全削除しました")
+            st.rerun()
+
+# メインエリアをタブで分割
+tab_register, tab_list = st.tabs(["🆕 ライブ登録", "📅 予定一覧・カレンダー"])
+
+# --- タブ1: ライブ登録 ---
+with tab_register:
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.subheader("1. スクショをアップロード")
+        uploaded_file = st.file_uploader("画像を選択．．．", type=['png', 'jpg', 'jpeg'])
+
+        if uploaded_file:
+            image = Image.open(uploaded_file)
+            st.image(image, caption='解析対象の画像', use_container_width=True)
+
+            if st.button("✨ AIで解析を実行する", type="primary"):
+                with st.spinner(f'{selected_model} で解析中...'):
+                    result = extract_info_from_gemini(image, selected_model)
+                    if result:
+                        st.session_state['edit_data'] = result
+                        st.success("解析に成功しました！右側で内容を確認してください。")
+
+    with col2:
+        st.subheader("2. 内容の確認・保存")
+        if 'edit_data' in st.session_state:
+            d = st.session_state['edit_data']
+
+            with st.form("edit_form"):
+                name = st.text_input("イベント名称", d.get("イベント名称", ""))
+                date = st.text_input("公演日", d.get("公演日", ""))
+                venue = st.text_input("会場名", d.get("会場名", ""))
+                # リストを編集可能な文字列に変換
+                artists_list = d.get("出演者リスト", [])
+                artists = st.text_area("出演者（カンマ区切り）", ", ".join(artists_list) if artists_list else "")
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    start_time = st.text_input("開演時間", d.get("開演時間", ""))
+                    price = st.text_input("チケット金額", d.get("チケット金額", ""))
+                with col_b:
+                    organizer = st.text_input("主催者", d.get("主催者", ""))
+                    contact = st.text_input("問い合わせ先", d.get("問い合わせ先", ""))
+                
+                url = st.text_input("関連URL", d.get("関連URL", ""))
+
+                submitted = st.form_submit_button("✅ データベースに保存")
+
+                if submitted:
+                    c = db_conn.cursor()
+                    c.execute('''INSERT INTO events 
+                                (name, date, venue, artists, start_time,
+                                price, organizer, contact, url) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
+                            (name, date, venue, artists, start_time,
+                            price, organizer, contact, url))
+                    db_conn.commit()
+
+                    # セッションデータのクリーンアップ（安全な方法）
+                    st.session_state.pop('edit_data', None)
+                    st.success("保存しました！")
+                    # 画面を再起動してリストを更新する
+                    st.rerun()
+                else:
+                    st.info("左側で画像をアップロードして解析ボタンを押すと、ここに編集フォームが表示されます。")
+
+# --- タブ2: 予定一覧・カレンダー ---
+with tab_list:
+    st.subheader("📅 保存されたライブ予定")
+
+    # データ読み込み
+    df_all = pd.read_sql_query("SELECT * FROM events ORDER BY date ASC", db_conn)
+
+    if not df_all.empty:
+        # 日付文字列をソート可能な形式に変換する補助（エラー回避のため）
+        def safe_parse_date(date_str):
+            try:
+                # 2026/04/25 のような形式を想定
+                dt = pd.to_datetime(date_str.replace("/", "-"))
+                if dt.tzinfo is not None:
+                    dt = dt.tz_localize(None)
+                return dt
+            except:
+                return pd.NaT
+            
+        df_all['parsed_date'] = df_all['date'].apply(safe_parse_date)
+        df_display = df_all.sort_values('parsed_date', ascending=True)
+
+        # カレンダー風のタイムライン表示
+        for index, row in df_display.iterrows():
+            event_id = row['id']
+            # 編集モードかどうかの判定
+            is_editing = st.session_state.get('editing_id') == event_id
+        
+            with st.expander(f"📌 {row['date']} | {row['name']} @ {row['venue']}"):
+                if is_editing:
+                    # --- 編集フォームの表示 ---
+                    with st.form(f"edit_form_{event_id}"):
+                        new_name = st.text_input("イベント名称", row['name'])
+                        new_date = st.text_input("公演日", row['date'])
+                        new_venue = st.text_input("会場名", row['venue'])
+                        new_artists = st.text_area("出演者（カンマ区切り）", row['artists'])
+                        new_start = st.text_input("開演時間", row['start_time'])
+                        new_price = st.text_input("料金", row['price'])
+                        new_url = st.text_input("URL", row['url'])
+
+                        col_btn1, col_btn2 = st.columns(2)
+                        if col_btn1.form_submit_button("💾 変更を保存"):
+                            c = db_conn.cursor()
+                            c.execute('''UPDATE events SET name=?,
+                                      date=?, venue=?, artists=?,
+                                      start_time=?, price=?, url=?
+                                      WHERE id=?''', 
+                                      (new_name, new_date, new_venue,
+                                       new_artists, new_start, new_price,
+                                       new_url, event_id))
+                            db_conn.commit()
+                            st.session_state.pop('editing_id', None) # 編集モード終了
+                            st.success("更新しました！")
+                            st.rerun()
+                        
+                        if col_btn2.form_submit_button("✖ キャンセル"):
+                            st.session_state.pop('editing_id', None)
+                            st.rerun()
+                else:
+                    # --- 通常表示 ---
+                    col_info, col_artists = st.columns([2, 1])
+                    with col_info:
+                        st.write(f"**会場:** {row['venue']}")
+                        st.write(f"**開演:** {row['start_time']}")
+                        st.write(f"**料金:** {row['price']}")
+                        cal_url = get_google_calendar_url(row['name'], row['date'], row['venue'], row['url'])
+                        st.link_button("📅 Googleカレンダーに登録", cal_url)
+                        if row['url']:
+                            st.link_button("チケット・詳細URL", row['url'])
+
+                    with col_artists:
+                        st.write("**出演:**")
+                        for artist in row['artists'].split(","):
+                            st.code(artist.strip())
+
+                    st.divider()
+                    col_edit, col_del = st.columns([1, 1])
+                    if col_edit.button(f"📝 編集", key=f"edit_btn_{event_id}"):
+                        st.session_state['editing_id'] = event_id
+                        st.rerun()
+                    
+                    if col_del.button(f"🗑️ 削除", key=f"del_{event_id}"):
+                        db_conn.cursor().execute("DELETE FROM events WHERE id=?", (event_id,))
+                        db_conn.commit()
+                        st.rerun()
+    else:
+        st.write("予定がありません。")
