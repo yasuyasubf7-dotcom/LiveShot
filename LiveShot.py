@@ -23,7 +23,6 @@ def upload_image_to_storage(img_obj, filename):
     bucket_name = bucket_name.replace("gs://", "").strip().rstrip("/")
 
     bucket = client.bucket(bucket_name)
-    st.write("bucket_name=", bucket_name)
 
     # ファイル名衝突防止
     unique_name = f"images/{uuid.uuid4()}_{filename}"
@@ -37,8 +36,13 @@ def upload_image_to_storage(img_obj, filename):
 
     blob.upload_from_file(buf)
 
-    # 公開URL（超重要）
-    blob.make_public()
+
+    image_url = f"https://storage.googleapis.com/{bucket_name}/{unique_name}"
+
+    # デバッグ用（最初は一度出すと安心）
+    st.write("✅ uploaded to:", unique_name)
+    st.write("✅ image_url:", image_url)
+
 
     return blob.public_url
 
