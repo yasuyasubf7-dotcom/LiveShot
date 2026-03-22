@@ -17,7 +17,7 @@ def upload_image_to_storage(img_obj, filename):
     # Secretsから認証情報を再構築
     creds_info = st.secrets["gcp_service_account"]
     client = storage.Client.from_service_account_info(creds_info)
-    bucket = client.bucket("liveshot-image.appspot.com")
+    bucket = client.bucket("gs://liveshot-image.firebasestorage.app")
 
     # ファイル名衝突防止
     unique_name = f"images/{uuid.uuid4()}_{filename}"
