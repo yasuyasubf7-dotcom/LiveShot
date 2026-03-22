@@ -12,23 +12,26 @@ import uuid
 import io
 from google.oauth2 import service_account
 
+def sanitize_filename(filename: str) -> str:
+    # 半角スペースを _
+    name = filename.replace(" ", "_")
+
+    # URL・ファイルパス的に危険な文字を除去
+    name = re.sub(r'[\\/:*?"<>|!()]+', "_", name)
+
+    return name
+
 
 def upload_image_to_storage(img_obj, filename):
     # Secretsから認証情報を再構築
     creds_info = st.secrets["gcp_service_account"]
     client = storage.Client.from_service_account_info(creds_info)
 
-
     bucket_name = "liveshot-image.firebasestorage.app"
-    bucket_name = bucket_name.replace("gs://", "").strip().rstrip("/")
-
     bucket = client.bucket(bucket_name)
-
     
     # ✅ ファイル名を安全化（/ やスペース問題を回避）
-    safe_filename = re.sub(r'[\\/:"*?<>|]+', '_', filename)
-
-
+    safe_filename = sanitize_filename(filename)
     # ファイル名衝突防止
     unique_name = f"images/{uuid.uuid4()}_{safe_filename}"
 
@@ -38,16 +41,13 @@ def upload_image_to_storage(img_obj, filename):
     buf = io.BytesIO()
     img_obj.save(buf, format="JPEG")
     buf.seek(0)
-
     blob.upload_from_file(buf)
-
 
     image_url = f"https://storage.googleapis.com/{bucket_name}/{unique_name}"
 
     # デバッグ用（最初は一度出すと安心）
     st.write("✅ uploaded to:", unique_name)
     st.write("✅ image_url:", image_url)
-
 
     return image_url
 
