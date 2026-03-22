@@ -24,8 +24,13 @@ def upload_image_to_storage(img_obj, filename):
 
     bucket = client.bucket(bucket_name)
 
+    
+    # ✅ ファイル名を安全化（/ やスペース問題を回避）
+    safe_filename = re.sub(r'[\\/:"*?<>|]+', '_', filename)
+
+
     # ファイル名衝突防止
-    unique_name = f"images/{uuid.uuid4()}_{filename}"
+    unique_name = f"images/{uuid.uuid4()}_{safe_filename}"
 
     blob = bucket.blob(unique_name)
     blob.content_type = "image/jpeg"
@@ -44,7 +49,7 @@ def upload_image_to_storage(img_obj, filename):
     st.write("✅ image_url:", image_url)
 
 
-    return blob.public_url
+    return image_url
 
 
 #  - スキーム無し (www.example.com) も https:// を補完
