@@ -22,7 +22,7 @@ def upload_image_to_drive(img_obj, filename):
     service = build('drive', 'v3', credentials=credentials)
 
     # PIL画像をバイトデータに変換
-    buf = io.Bytes()
+    buf = io.BytesIO()
     img_obj.save(buf, format="JPEG")
     buf.seek(0)
 
@@ -312,7 +312,6 @@ with tab_list:
 
                         if "image_url" in row and pd.notna(row["image_url"]):
                             st.image(row["image_url"], caption="元のスクショ", use_container_width=True)
-
 
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 変更を保存"):
