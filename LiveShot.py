@@ -9,6 +9,34 @@ from datetime import datetime
 import urllib.parse
 import re
 from streamlit_gsheets import GSheetsConnection
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import io
+from google.oauth2 import service_account
+
+
+def upload_image_to_drive(img_obj, filename):
+    # Secretsから認証情報を再構築
+    info = st.secrets["connections"]["gsheets"]
+    credentials = service_account.Credentials.from_service_account_info(info)
+    service = build('drive', 'v3', credentials=credentials)
+
+    # PIL画像をバイトデータに変換
+    buf = io.Bytes()
+    img_obj.save(buf, format="JPEG")
+    buf.seek(0)
+
+    file_metadata = {
+        'name': filename,
+        'parents': ['1Jge6wxBlM0FG1pcgGFVuU_TiHeFngB3e']
+    }
+    media = MediaIoBaseUpload(buf, mimetype='image/jpeg')
+    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+    # Streamlitで表示可能な直リンクURLを生成
+    return f"https://drive.google.com/uc?id={file.get('id')}"
+
+
 
 
 #  - スキーム無し (www.example.com) も https:// を補完
@@ -210,6 +238,8 @@ with tab_register:
                 url = st.text_input("関連URL", d.get("関連URL", ""))
 
                 if st.form_submit_button("✅ スプレッドシートに保存"):
+                    # 画像をアップロードしてURLを取得
+                    image_url = upload_image_to_drive(image, f"{name}_{date}.jpg")
                     safe_url = normalize_url(url) or ""
                     new_data = pd.DataFrame([{
                         "name": name,
@@ -220,7 +250,8 @@ with tab_register:
                         "price": price,
                         "organizer": organizer,
                         "contact": contact,
-                        "url": safe_url
+                        "url": safe_url,
+                        "image_url": image_url
                     }])
 
                     # 既存のデータを読み込んで結合
@@ -278,6 +309,9 @@ with tab_list:
                         new_contact = st.text_input("問い合わせ先", row.get("contact", ""))
                         new_url_raw = st.text_input("URL", row.get("url", ""))
                         new_url = normalize_url(new_url_raw) or ""
+
+                        if "image_url" in row and pd.notna(row["image_url"]):
+                            st.image(row["image_url"], caption="元のスクショ", use_container_width=True)
 
 
                         col_btn1, col_btn2 = st.columns(2)
