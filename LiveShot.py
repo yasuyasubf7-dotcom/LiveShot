@@ -1,7 +1,5 @@
 import streamlit as st
 from google import genai
-from google.genai import types
-import sqlite3
 import json
 from PIL import Image
 import pandas as pd
@@ -9,34 +7,34 @@ from datetime import datetime
 import urllib.parse
 import re
 from streamlit_gsheets import GSheetsConnection
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from google.cloud import storage
+import uuid
 import io
 from google.oauth2 import service_account
 
 
-def upload_image_to_drive(img_obj, filename):
+def upload_image_to_storage(img_obj, filename):
     # Secretsから認証情報を再構築
-    info = st.secrets["connections"]["gsheets"]
-    credentials = service_account.Credentials.from_service_account_info(info)
-    service = build('drive', 'v3', credentials=credentials)
+    creds_info = st.secrets["gcp_service_account"]
+    client = storage.Client.from_service_account_info(creds_info)
+    bucket = client.bucket("")
 
-    # PIL画像をバイトデータに変換
+    # ファイル名衝突防止
+    unique_name = f"images/{uuid.uuid4()}_{filename}"
+
+    blob = bucket.blob(unique_name)
+    blob.content_type = "image/jpeg"
+
     buf = io.BytesIO()
     img_obj.save(buf, format="JPEG")
     buf.seek(0)
 
-    file_metadata = {
-        'name': filename,
-        'parents': ['1Jge6wxBlM0FG1pcgGFVuU_TiHeFngB3e']
-    }
-    media = MediaIoBaseUpload(buf, mimetype='image/jpeg')
-    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+    blob.upload_from_file(buf)
 
-    # Streamlitで表示可能な直リンクURLを生成
-    return f"https://drive.google.com/uc?id={file.get('id')}"
+    # 公開URL（超重要）
+    blob.make_public()
 
-
+    return blob.public_url
 
 
 #  - スキーム無し (www.example.com) も https:// を補完
@@ -203,7 +201,7 @@ with tab_register:
 
         if uploaded_file:
             image = Image.open(uploaded_file)
-            st.image(image, caption='解析対象の画像', use_container_width=True)
+            st.image(image, caption='解析対象の画像', width="stretch")
 
             if st.button("✨ AIで解析を実行する", type="primary"):
                 with st.spinner(f'{selected_model} で解析中...'):
@@ -239,7 +237,7 @@ with tab_register:
 
                 if st.form_submit_button("✅ スプレッドシートに保存"):
                     # 画像をアップロードしてURLを取得
-                    image_url = upload_image_to_drive(image, f"{name}_{date}.jpg")
+                    image_url = upload_image_to_storage(image, f"{name}_{date}.jpg")
                     safe_url = normalize_url(url) or ""
                     new_data = pd.DataFrame([{
                         "name": name,
@@ -311,7 +309,7 @@ with tab_list:
                         new_url = normalize_url(new_url_raw) or ""
 
                         if "image_url" in row and pd.notna(row["image_url"]):
-                            st.image(row["image_url"], caption="元のスクショ", use_container_width=True)
+                            st.image(row["image_url"], caption="元のスクショ", width="stretch")
 
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 変更を保存"):
