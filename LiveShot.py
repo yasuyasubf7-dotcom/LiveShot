@@ -5,6 +5,7 @@ from PIL import Image
 import pandas as pd
 from datetime import datetime
 import urllib.parse
+from urllib.parse import quote
 import re
 from streamlit_gsheets import GSheetsConnection
 from google.cloud import storage
@@ -43,7 +44,7 @@ def upload_image_to_storage(img_obj, filename):
     buf.seek(0)
     blob.upload_from_file(buf)
 
-    image_url = f"https://storage.googleapis.com/{bucket_name}/{unique_name}"
+    image_url = f"https://storage.googleapis.com/{bucket_name}/{quote(unique_name)}"
 
     # デバッグ用（最初は一度出すと安心）
     st.write("✅ uploaded to:", unique_name)
