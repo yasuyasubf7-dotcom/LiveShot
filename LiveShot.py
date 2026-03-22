@@ -8,6 +8,8 @@ import pandas as pd
 from datetime import datetime
 import urllib.parse
 import re
+from streamlit_gsheets import GSheetsConnection
+
 
 # --- カレンダーURL生成ヘルパー ---
 def get_google_calendar_url(name, date_str, venue, start_time, url):
@@ -20,40 +22,26 @@ def get_google_calendar_url(name, date_str, venue, start_time, url):
         clean_date = ""
 
     # 時刻の整形 (19:00 -> 190000)
-    itme_str = "000000" # デフォルト
+    time_str = "000000" # デフォルト
     if start_time:
         digits = re.sub(r'\D', '', start_time) # 数字のみ抽出
         if len(digits) >= 4:
             time_str = digits[:4] + "00"
 
-    # 開始と終了（とりあえず3時間後）を設定
+    # 開始を設定
     start_dt = f"{clean_date}T{time_str}"
-    # 簡易的に同じ時刻を終了に設定（Google側で調整可能）
-    dates = f"{start_dt}/{start_dt}"    
 
     params = {
         "text": f"ライブ: {name}",
-        "dates": f"{clean_date}/{clean_date}",
+        "dates": f"{start_dt}/{start_dt}",
         "location": venue,
         "details": f"詳細URL {url}",
     }
-    return base_url + "&" +urllib.parse.urlencode(params)
+    return base_url + "&" + urllib.parse.urlencode(params)
 
-# --- 0. データベース初期設定 ---
-def init_db():
-    conn = sqlite3.connect('live_info.db', check_same_thread=False)
-    c = conn.cursor()
-    # eventsテーブルの作成（出演者リストはカンマ区切りの文字列として保存）
-    c.execute('''CREATE TABLE IF NOT EXISTS events 
-                (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                 name TEXT, date TEXT, venue TEXT, artists TEXT, 
-                 start_time TEXT, price TEXT, organizer TEXT, 
-                 contact TEXT, url TEXT,
-                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    return conn
-
-db_conn = init_db()
+# --- 0. スプレッドシート接続設定 ---
+# SQLiteの init_db の代わりにこれを使います
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- 1. 利用可能なモデルを取得する関数 ---
 def get_available_models():
@@ -78,14 +66,20 @@ def extract_info_from_gemini(image, model_id):
     # 1. クライアントの初期化（configではなくClientオブジェクトを作る形式に）
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-    prompt = """
+    # 今日の日付を取得してプロンプトに混ぜる
+    current_year = datetime.now().year
+
+    prompt = f"""
     あなたはライブ情報の抽出に特化したアシスタントです。
     提供された画像から、以下の項目を抽出し、JSON形式のみで出力してください。
     Markdownの装飾(```jsonなど)は一切不要です。
     
     【項目】
     - イベント名称
-    - 公演日(YYYY/MM/DD形式を推測、不明なら画像通りに)
+    - 公演日
+      -公演日に関するルール
+      -YYYY/MM/DD形式を推測
+      -公演日に「年」の記載がない場合は、一律「{current_year}年」として補完
     - 会場名
     - 出演者リスト（配列）
     - 開演時間
@@ -134,8 +128,12 @@ with st.sidebar:
     st.header("🗑️ データ管理")
     if st.button("全データを削除 (注意!)"):
         if st.checkbox("本当に削除しますか？"):
-            db_conn.cursor().execute("DELETE FROM events")
-            db_conn.commit()
+            # スプレッドシートを空のヘッダーのみにする処理
+            empty_df  = pd.DataFrame(columns=['name', 'date', 'venue',
+                                              'artists', 'start_time',
+                                              'price', 'organizer',
+                                              'contact', 'url'])
+            conn.update(data=empty_df)
             st.warning("データを全削除しました")
             st.rerun()
 
@@ -164,7 +162,7 @@ with tab_register:
     with col2:
         st.subheader("2. 内容の確認・保存")
         if 'edit_data' in st.session_state:
-            d = st.session_state['edit_data']
+            d = st.session_state.get('edit_data', {})
 
             with st.form("edit_form"):
                 name = st.text_input("イベント名称", d.get("イベント名称", ""))
@@ -172,6 +170,8 @@ with tab_register:
                 venue = st.text_input("会場名", d.get("会場名", ""))
                 # リストを編集可能な文字列に変換
                 artists_list = d.get("出演者リスト", [])
+                if not isinstance(artists_list, list):
+                    artists_list = []
                 artists = st.text_area("出演者（カンマ区切り）", ", ".join(artists_list) if artists_list else "")
 
                 col_a, col_b = st.columns(2)
@@ -184,17 +184,24 @@ with tab_register:
                 
                 url = st.text_input("関連URL", d.get("関連URL", ""))
 
-                submitted = st.form_submit_button("✅ データベースに保存")
+                if st.form_submit_button("✅ スプレッドシートに保存"):
+                    new_data = pd.DataFrame([{
+                        "name": name,
+                        "date": date,
+                        "venue": venue,
+                        "artists": artists,
+                        "start_time": start_time,
+                        "price": price,
+                        "organizer": organizer,
+                        "contact": contact,
+                        "url": url
+                    }])
 
-                if submitted:
-                    c = db_conn.cursor()
-                    c.execute('''INSERT INTO events 
-                                (name, date, venue, artists, start_time,
-                                price, organizer, contact, url) 
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
-                            (name, date, venue, artists, start_time,
-                            price, organizer, contact, url))
-                    db_conn.commit()
+                    # 既存のデータを読み込んで結合
+                    existing_data = conn.read(ttl=0) # ttl=0で最新を取得
+                    updated_df = pd.concat([existing_data, new_data], ignore_index=True)
+                    # 書き込み
+                    conn.update(data=updated_df)
 
                     # セッションデータのクリーンアップ（安全な方法）
                     st.session_state.pop('edit_data', None)
@@ -209,7 +216,7 @@ with tab_list:
     st.subheader("📅 保存されたライブ予定")
 
     # データ読み込み
-    df_all = pd.read_sql_query("SELECT * FROM events ORDER BY date ASC", db_conn)
+    df_all = conn.read(ttl=0)
 
     if not df_all.empty:
         # 日付文字列をソート可能な形式に変換する補助（エラー回避のため）
@@ -227,15 +234,14 @@ with tab_list:
         df_display = df_all.sort_values('parsed_date', ascending=True)
 
         # カレンダー風のタイムライン表示
-        for index, row in df_display.iterrows():
-            event_id = row['id']
+        for idx, row in df_display.iterrows():
             # 編集モードかどうかの判定
-            is_editing = st.session_state.get('editing_id') == event_id
+            is_editing = st.session_state.get('editing_id') == idx
         
             with st.expander(f"📌 {row['date']} | {row['name']} @ {row['venue']}"):
                 if is_editing:
                     # --- 編集フォームの表示 ---
-                    with st.form(f"edit_form_{event_id}"):
+                    with st.form(f"edit_{idx}"):
                         new_name = st.text_input("イベント名称", row['name'])
                         new_date = st.text_input("公演日", row['date'])
                         new_venue = st.text_input("会場名", row['venue'])
@@ -246,15 +252,9 @@ with tab_list:
 
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 変更を保存"):
-                            c = db_conn.cursor()
-                            c.execute('''UPDATE events SET name=?,
-                                      date=?, venue=?, artists=?,
-                                      start_time=?, price=?, url=?
-                                      WHERE id=?''', 
-                                      (new_name, new_date, new_venue,
-                                       new_artists, new_start, new_price,
-                                       new_url, event_id))
-                            db_conn.commit()
+                            # 特定の行を書き換えて上書き
+                            df_all.loc[idx, ['name','date','venue','artists','start_time','url']]\
+                                = [new_name, new_date, new_venue, new_artists, new_start, new_url]
                             st.session_state.pop('editing_id', None) # 編集モード終了
                             st.success("更新しました！")
                             st.rerun()
@@ -281,13 +281,13 @@ with tab_list:
 
                     st.divider()
                     col_edit, col_del = st.columns([1, 1])
-                    if col_edit.button(f"📝 編集", key=f"edit_btn_{event_id}"):
-                        st.session_state['editing_id'] = event_id
+                    if col_edit.button(f"📝 編集", key=f"edit_btn_{idx}"):
+                        st.session_state['editing_id'] = idx
                         st.rerun()
                     
-                    if col_del.button(f"🗑️ 削除", key=f"del_{event_id}"):
-                        db_conn.cursor().execute("DELETE FROM events WHERE id=?", (event_id,))
-                        db_conn.commit()
+                    if col_del.button(f"🗑️ 削除", key=f"del_{idx}"):
+                        df_all = df_all.drop(idx)
+                        conn.update(data=df_all.drop(columns=['parsed_date']))
                         st.rerun()
     else:
         st.write("予定がありません。")
