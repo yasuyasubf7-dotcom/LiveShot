@@ -353,6 +353,16 @@ with tab_list:
                             st.rerun()
                 else:
                     # --- 通常表示 ---
+                    # ✅ 画像を最初に表示する（ここが重要）
+                    if "image_url" in row and pd.notna(row["image_url"]):
+                        from urllib.parse import quote
+                        safe_image_url = quote(row["image_url"], safe=":/")
+                        st.image(
+                            safe_image_url,
+                            caption="スクショ",
+                            use_container_width=True
+                        )
+
                     col_info, col_artists = st.columns([2, 1])
                     with col_info:
                         st.write(f"**会場:** {row['venue']}")
