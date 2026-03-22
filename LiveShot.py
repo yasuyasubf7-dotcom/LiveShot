@@ -11,6 +11,30 @@ import re
 from streamlit_gsheets import GSheetsConnection
 
 
+#  - スキーム無し (www.example.com) も https:// を補完
+def normalize_url(value):
+    # None / NaN をはじく
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except  Exception:
+        pass
+    s = str(value).strip()
+
+    # 空文字・"nan" 文字列を弾く
+    if not s or s.lower() == "nan":
+        return None
+    
+    # スキーム補完
+    if not (s.startswith("http://") or s.startswith("https://")):
+        s = "https://" + s
+
+    return s
+
+
+
 # --- カレンダーURL生成ヘルパー ---
 def get_google_calendar_url(name, date_str, venue, start_time, url):
     base_url = "https://www.google.com/calendar/render?action=TEMPLATE"
@@ -30,12 +54,13 @@ def get_google_calendar_url(name, date_str, venue, start_time, url):
 
     # 開始を設定
     start_dt = f"{clean_date}T{time_str}"
+    safe_url = normalize_url(url) or ""
 
     params = {
         "text": f"ライブ: {name}",
         "dates": f"{start_dt}/{start_dt}",
         "location": venue,
-        "details": f"詳細URL {url}",
+        "details": f"詳細URL {safe_url}",
     }
     return base_url + "&" + urllib.parse.urlencode(params)
 
@@ -185,6 +210,7 @@ with tab_register:
                 url = st.text_input("関連URL", d.get("関連URL", ""))
 
                 if st.form_submit_button("✅ スプレッドシートに保存"):
+                    safe_url = normalize_url(url) or ""
                     new_data = pd.DataFrame([{
                         "name": name,
                         "date": date,
@@ -194,7 +220,7 @@ with tab_register:
                         "price": price,
                         "organizer": organizer,
                         "contact": contact,
-                        "url": url
+                        "url": safe_url
                     }])
 
                     # 既存のデータを読み込んで結合
@@ -248,13 +274,29 @@ with tab_list:
                         new_artists = st.text_area("出演者（カンマ区切り）", row['artists'])
                         new_start = st.text_input("開演時間", row['start_time'])
                         new_price = st.text_input("料金", row['price'])
-                        new_url = st.text_input("URL", row['url'])
+                        new_organizer = st.text_input("主催者", row.get("organizer", ""))
+                        new_contact = st.text_input("問い合わせ先", row.get("contact", ""))
+                        new_url_raw = st.text_input("URL", row.get("url", ""))
+                        new_url = normalize_url(new_url_raw) or ""
+
 
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 変更を保存"):
-                            # 特定の行を書き換えて上書き
-                            df_all.loc[idx, ['name','date','venue','artists','start_time','url']]\
-                                = [new_name, new_date, new_venue, new_artists, new_start, new_url]
+                            # parsed_date は表示用なので落としてから保存する
+                            base_df = df_all.drop(columns=["parsed_date"])
+                            base_df.loc[idx, ["name", "date", "venue", "artists", "start_time",
+                                              "price", "organizer", "contact", "url"]] = [
+                                                new_name,
+                                                new_date,
+                                                new_venue,
+                                                new_artists,
+                                                new_start,
+                                                new_price,
+                                                new_organizer,
+                                                new_contact,
+                                                new_url,
+                                                ]
+                            conn.update(data=base_df)
                             st.session_state.pop('editing_id', None) # 編集モード終了
                             st.success("更新しました！")
                             st.rerun()
@@ -271,13 +313,17 @@ with tab_list:
                         st.write(f"**料金:** {row['price']}")
                         cal_url = get_google_calendar_url(row['name'], row['date'], row['venue'], row['start_time'], row['url'])
                         st.link_button("📅 Googleカレンダーに登録", cal_url)
-                        if row['url']:
-                            st.link_button("チケット・詳細URL", row['url'])
+                        ticket_url = normalize_url(row.get("url"))
+                        if ticket_url:
+                            st.link_button("チケット・詳細URL", ticket_url)
 
                     with col_artists:
                         st.write("**出演:**")
-                        for artist in row['artists'].split(","):
-                            st.code(artist.strip())
+                        artists_text = str(row.get("artists", "") or "")
+                        for artist in artists_text.split(","):
+                            a = artist.strip()
+                            if a:
+                                st.code(a)
 
                     st.divider()
                     col_edit, col_del = st.columns([1, 1])
@@ -285,9 +331,11 @@ with tab_list:
                         st.session_state['editing_id'] = idx
                         st.rerun()
                     
-                    if col_del.button(f"🗑️ 削除", key=f"del_{idx}"):
-                        df_all = df_all.drop(idx)
-                        conn.update(data=df_all.drop(columns=['parsed_date']))
+                    if col_del.button("🗑️ 削除", key=f"del_{idx}"):
+                        base_df = df_all.drop(columns=["parsed_date"], errors="ignore")
+                        base_df = base_df.drop(idx)
+                        conn.update(data=base_df)
                         st.rerun()
+
     else:
         st.write("予定がありません。")
