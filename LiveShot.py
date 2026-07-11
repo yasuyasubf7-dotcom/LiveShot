@@ -5,96 +5,44 @@ from PIL import Image
 import pandas as pd
 from datetime import datetime
 import urllib.parse
-from urllib.parse import quote
 import re
 from streamlit_gsheets import GSheetsConnection
-from google.cloud import storage
-import uuid
-import io
-from google.oauth2 import service_account
-
-def sanitize_filename(filename: str) -> str:
-    # 半角スペースを _
-    name = filename.replace(" ", "_")
-
-    # URL・ファイルパス的に危険な文字を除去
-    name = re.sub(r'[\\/:*?"<>|!()]+', "_", name)
-
-    return name
-
-
-def upload_image_to_storage(img_obj, filename):
-    # Secretsから認証情報を再構築
-    creds_info = st.secrets["gcp_service_account"]
-    client = storage.Client.from_service_account_info(creds_info)
-
-    bucket_name = "liveshot-image.firebasestorage.app"
-    bucket = client.bucket(bucket_name)
-    
-    # ✅ ファイル名を安全化（/ やスペース問題を回避）
-    safe_filename = sanitize_filename(filename)
-    # ファイル名衝突防止
-    unique_name = f"images/{uuid.uuid4()}_{safe_filename}"
-
-    blob = bucket.blob(unique_name)
-    blob.content_type = "image/jpeg"
-
-    buf = io.BytesIO()
-    img_obj.save(buf, format="JPEG")
-    buf.seek(0)
-    blob.upload_from_file(buf)
-
-    image_url = f"https://storage.googleapis.com/{bucket_name}/{quote(unique_name)}"
-
-    # デバッグ用（最初は一度出すと安心）
-    st.write("✅ uploaded to:", unique_name)
-    st.write("✅ image_url:", image_url)
-
-    return image_url
-
 
 #  - スキーム無し (www.example.com) も https:// を補完
 def normalize_url(value):
-    # None / NaN をはじく
     if value is None:
         return None
     try:
         if pd.isna(value):
             return None
-    except  Exception:
+    except Exception:
         pass
     s = str(value).strip()
 
-    # 空文字・"nan" 文字列を弾く
     if not s or s.lower() == "nan":
         return None
     
-    # スキーム補完
     if not (s.startswith("http://") or s.startswith("https://")):
         s = "https://" + s
 
     return s
 
 
-
 # --- カレンダーURL生成ヘルパー ---
 def get_google_calendar_url(name, date_str, venue, start_time, url):
     base_url = "https://www.google.com/calendar/render?action=TEMPLATE"
     
-    # 日付と時刻の整形 (YYYYMMDD形式)
     try:
         clean_date = date_str.replace("/", "").replace("-", "")[:8]
     except:
         clean_date = ""
 
-    # 時刻の整形 (19:00 -> 190000)
     time_str = "000000" # デフォルト
     if start_time:
         digits = re.sub(r'\D', '', start_time) # 数字のみ抽出
         if len(digits) >= 4:
             time_str = digits[:4] + "00"
 
-    # 開始を設定
     start_dt = f"{clean_date}T{time_str}"
     safe_url = normalize_url(url) or ""
 
@@ -106,34 +54,30 @@ def get_google_calendar_url(name, date_str, venue, start_time, url):
     }
     return base_url + "&" + urllib.parse.urlencode(params)
 
+
 # --- 0. スプレッドシート接続設定 ---
-# SQLiteの init_db の代わりにこれを使います
 conn = st.connection("gsheets", type=GSheetsConnection)
+
 
 # --- 1. 利用可能なモデルを取得する関数 ---
 def get_available_models():
     try:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        # モデル一覧を取得
         models = client.models.list()
-        # 生成（generateContent）が可能なモデルのみを抽出
         valid_models = [
             (m.name or "").replace("models/", "")
             for m in models
             if "generateContent" in (getattr(m, "supported_actions", []) or [])
         ]
-        # 取得できなかったときの保険（空配列対策）
         return valid_models or ["gemini-flash-lite-latest"]
     except Exception as e:
         st.error(f"モデルリストの取得に失敗しました: {e}")
         return ["gemini-flash-lite-latest"]
 
-# --- 2. Gemini APIによる解析エンジン（model_idを引数で受け取る） ---
-def extract_info_from_gemini(image, model_id):
-    # 1. クライアントの初期化（configではなくClientオブジェクトを作る形式に）
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-    # 今日の日付を取得してプロンプトに混ぜる
+# --- 2. Gemini APIによる解析エンジン ---
+def extract_info_from_gemini(image, model_id):
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     current_year = datetime.now().year
 
     prompt = f"""
@@ -161,25 +105,22 @@ def extract_info_from_gemini(image, model_id):
             model=model_id,
             contents=[prompt, image]
         )
-
-        # 4. JSONのパース（新しいSDKでは .text で結果が取れます）
         res_text = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(res_text)
     
     except Exception as e:
-        # クォータエラーの場合、ユーザーにわかりやすく伝える
         if "429" in str(e):
             st.error(f"モデル '{model_id}' の無料枠制限に達しました。別のモデルを試すか、数分待ってください。")
         else:
             st.error(f"解析中にエラーが発生しました：{e}")
         return None
 
+
 # --- 3. Streamlit UIレイアウト ---
 st.set_page_config(page_title="LiveShot Admin", layout="wide")
 st.title("🎸 LiveShot: スクショを予定に変える")
 
 with st.sidebar:
-    # サイドバーでモデルを選択
     st.header("⚙️ 設定")
     available_models = get_available_models()
     selected_model = st.selectbox(
@@ -191,11 +132,9 @@ with st.sidebar:
 
     st.divider()
 
-    # サイドバー: 保存済みのデータの確認
     st.header("🗑️ データ管理")
     if st.button("全データを削除 (注意!)"):
         if st.checkbox("本当に削除しますか？"):
-            # スプレッドシートを空のヘッダーのみにする処理
             empty_df  = pd.DataFrame(columns=['name', 'date', 'venue',
                                               'artists', 'start_time',
                                               'price', 'organizer',
@@ -235,7 +174,7 @@ with tab_register:
                 name = st.text_input("イベント名称", d.get("イベント名称", ""))
                 date = st.text_input("公演日", d.get("公演日", ""))
                 venue = st.text_input("会場名", d.get("会場名", ""))
-                # リストを編集可能な文字列に変換
+                
                 artists_list = d.get("出演者リスト", [])
                 if not isinstance(artists_list, list):
                     artists_list = []
@@ -252,8 +191,7 @@ with tab_register:
                 url = st.text_input("関連URL", d.get("関連URL", ""))
 
                 if st.form_submit_button("✅ スプレッドシートに保存"):
-                    # 画像をアップロードしてURLを取得
-                    image_url = upload_image_to_storage(image, f"{name}_{date}.jpg")
+                    # 💡 画像保存の処理を撤廃し、テキストデータのみを保存
                     safe_url = normalize_url(url) or ""
                     new_data = pd.DataFrame([{
                         "name": name,
@@ -264,36 +202,30 @@ with tab_register:
                         "price": price,
                         "organizer": organizer,
                         "contact": contact,
-                        "url": safe_url,
-                        "image_url": image_url
+                        "url": safe_url
                     }])
 
-                    # 既存のデータを読み込んで結合
-                    existing_data = conn.read(ttl=0) # ttl=0で最新を取得
+                    existing_data = conn.read(ttl=0)
+                    # 既存データに image_url 列などが残っていても安全に結合
                     updated_df = pd.concat([existing_data, new_data], ignore_index=True)
-                    # 書き込み
+                    
                     conn.update(data=updated_df)
 
-                    # セッションデータのクリーンアップ（安全な方法）
                     st.session_state.pop('edit_data', None)
                     st.success("保存しました！")
-                    # 画面を再起動してリストを更新する
                     st.rerun()
-                else:
-                    st.info("左側で画像をアップロードして解析ボタンを押すと、ここに編集フォームが表示されます。")
+        else:
+            st.info("左側で画像をアップロードして解析ボタンを押すと、ここに編集フォームが表示されます。")
 
 # --- タブ2: 予定一覧・カレンダー ---
 with tab_list:
     st.subheader("📅 保存されたライブ予定")
 
-    # データ読み込み
     df_all = conn.read(ttl=0)
 
     if not df_all.empty:
-        # 日付文字列をソート可能な形式に変換する補助（エラー回避のため）
         def safe_parse_date(date_str):
             try:
-                # 2026/04/25 のような形式を想定
                 dt = pd.to_datetime(date_str.replace("/", "-"))
                 if dt.tzinfo is not None:
                     dt = dt.tz_localize(None)
@@ -304,14 +236,11 @@ with tab_list:
         df_all['parsed_date'] = df_all['date'].apply(safe_parse_date)
         df_display = df_all.sort_values('parsed_date', ascending=True)
 
-        # カレンダー風のタイムライン表示
         for idx, row in df_display.iterrows():
-            # 編集モードかどうかの判定
             is_editing = st.session_state.get('editing_id') == idx
         
             with st.expander(f"📌 {row['date']} | {row['name']} @ {row['venue']}"):
                 if is_editing:
-                    # --- 編集フォームの表示 ---
                     with st.form(f"edit_{idx}"):
                         new_name = st.text_input("イベント名称", row['name'])
                         new_date = st.text_input("公演日", row['date'])
@@ -324,27 +253,18 @@ with tab_list:
                         new_url_raw = st.text_input("URL", row.get("url", ""))
                         new_url = normalize_url(new_url_raw) or ""
 
-                        if "image_url" in row and pd.notna(row["image_url"]):
-                            st.image(row["image_url"], caption="元のスクショ", width="stretch")
+                        # 💡 編集画面での画像表示処理を削除
 
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 変更を保存"):
-                            # parsed_date は表示用なので落としてから保存する
                             base_df = df_all.drop(columns=["parsed_date"])
                             base_df.loc[idx, ["name", "date", "venue", "artists", "start_time",
                                               "price", "organizer", "contact", "url"]] = [
-                                                new_name,
-                                                new_date,
-                                                new_venue,
-                                                new_artists,
-                                                new_start,
-                                                new_price,
-                                                new_organizer,
-                                                new_contact,
-                                                new_url,
+                                                new_name, new_date, new_venue, new_artists,
+                                                new_start, new_price, new_organizer, new_contact, new_url
                                                 ]
                             conn.update(data=base_df)
-                            st.session_state.pop('editing_id', None) # 編集モード終了
+                            st.session_state.pop('editing_id', None)
                             st.success("更新しました！")
                             st.rerun()
                         
@@ -352,16 +272,7 @@ with tab_list:
                             st.session_state.pop('editing_id', None)
                             st.rerun()
                 else:
-                    # --- 通常表示 ---
-                    # ✅ 画像を最初に表示する（ここが重要）
-                    if "image_url" in row and pd.notna(row["image_url"]):
-                        from urllib.parse import quote
-                        safe_image_url = quote(row["image_url"], safe=":/")
-                        st.image(
-                            safe_image_url,
-                            caption="スクショ",
-                            use_container_width=True
-                        )
+                    # 💡 通常表示画面でのストレージ画像（image_url）表示処理を削除
 
                     col_info, col_artists = st.columns([2, 1])
                     with col_info:
@@ -393,6 +304,5 @@ with tab_list:
                         base_df = base_df.drop(idx)
                         conn.update(data=base_df)
                         st.rerun()
-
     else:
         st.write("予定がありません。")
